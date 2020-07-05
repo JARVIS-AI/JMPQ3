@@ -8,11 +8,7 @@ import systems.crigges.jmpq3.security.MPQEncryption;
 import systems.crigges.jmpq3.security.MPQHashGenerator;
 
 import java.io.*;
-import java.nio.BufferOverflowException;
-import java.nio.BufferUnderflowException;
-import java.nio.ByteBuffer;
-import java.nio.ByteOrder;
-import java.nio.MappedByteBuffer;
+import java.nio.*;
 
 public class MpqFile {
     public static final int COMPRESSED = 0x00000200;
@@ -204,7 +200,7 @@ public class MpqFile {
     /**
      * Write file and block.
      *
-     * @param newBlock    the new block
+     * @param newBlock        the new block
      * @param writeBuffer the write buffer
      */
     public void writeFileAndBlock(Block newBlock, MappedByteBuffer writeBuffer) throws JMpqException {
@@ -272,8 +268,8 @@ public class MpqFile {
     /**
      * Write file and block.
      *
-     * @param b          the b
-     * @param buf        the buf
+     * @param b                    the b
+     * @param buf                the buf
      * @param sectorSize the sector size
      * @param recompress
      */
@@ -283,9 +279,10 @@ public class MpqFile {
 
     /**
      * Write file and block.
-     *  @param fileArr    the file arr
-     * @param b          the b
-     * @param buf        the buf
+     *
+     * @param fileArr        the file arr
+     * @param b                    the b
+     * @param buf                the buf
      * @param sectorSize the sector size
      * @param recompress
      */
@@ -319,7 +316,7 @@ public class MpqFile {
                 compSector = CompressionUtil.compress(temp, recompress);
             } catch (ArrayIndexOutOfBoundsException ignored) {
             }
-            if (compSector != null && compSector.length+1 < temp.length) {
+            if (compSector != null && compSector.length + 1 < temp.length) {
                 if (b.hasFlag(ENCRYPTED)) {
                     final MPQHashGenerator keyGen = MPQHashGenerator.getFileKeyGenerator();
                     keyGen.process(pathlessName);
@@ -327,10 +324,10 @@ public class MpqFile {
                     if (b.hasFlag(ADJUSTED_ENCRYPTED)) {
                         bKey = ((bKey + b.getFilePos()) ^ b.getNormalSize());
                     }
-                    
+
                     if (new MPQEncryption(bKey + i, false).processFinal(
-                            ByteBuffer.wrap(DebugHelper.appendData((byte) 2, compSector), 0, compSector.length + 1), buf))
-                        throw new BufferOverflowException(); 
+                        ByteBuffer.wrap(DebugHelper.appendData((byte) 2, compSector), 0, compSector.length + 1), buf))
+                        throw new BufferOverflowException();
                 } else {
                     // deflate compression indicator
                     buf.put((byte) 2);
@@ -346,7 +343,7 @@ public class MpqFile {
                         bKey = ((bKey + b.getFilePos()) ^ b.getNormalSize());
                     }
                     if (new MPQEncryption(bKey + i, false).processFinal(ByteBuffer.wrap(temp), buf))
-                        throw new BufferOverflowException(); 
+                        throw new BufferOverflowException();
                 } else {
                     buf.put(temp);
                 }
@@ -366,7 +363,7 @@ public class MpqFile {
                 bKey = ((bKey + b.getFilePos()) ^ b.getNormalSize());
             }
             if (new MPQEncryption(bKey - 1, false).processFinal(sot, buf))
-                throw new BufferOverflowException(); 
+                throw new BufferOverflowException();
         } else {
             buf.put(sot);
         }
@@ -375,7 +372,7 @@ public class MpqFile {
     /**
      * Gets the sector as byte array.
      *
-     * @param buf        the buf
+     * @param buf                the buf
      * @param sectorSize the sector size
      * @return the sector as byte array
      */
@@ -388,8 +385,8 @@ public class MpqFile {
     /**
      * Decompress sector.
      *
-     * @param sector           the sector
-     * @param normalSize       the normal size
+     * @param sector                     the sector
+     * @param normalSize             the normal size
      * @param uncompressedSize the uncomp size
      * @return the byte[]
      * @throws JMpqException the j mpq exception
@@ -405,6 +402,6 @@ public class MpqFile {
     @Override
     public String toString() {
         return "MpqFile [sectorSize=" + sectorSize + ", compressedSize=" + compressedSize + ", normalSize=" + normalSize + ", flags=" + flags + ", name=" + name
-                + "]";
+            + "]";
     }
 }

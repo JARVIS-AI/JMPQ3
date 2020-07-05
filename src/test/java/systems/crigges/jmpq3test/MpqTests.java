@@ -9,16 +9,18 @@ import systems.crigges.jmpq3.*;
 import systems.crigges.jmpq3.compression.RecompressOptions;
 import systems.crigges.jmpq3.security.MPQEncryption;
 
-import java.io.*;
+import java.io.File;
+import java.io.FileInputStream;
+import java.io.IOException;
+import java.io.InputStream;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
-import java.util.Arrays;
-import java.util.LinkedHashSet;
-import java.util.Scanner;
-import java.util.Set;
+import java.util.*;
+
+import static systems.crigges.jmpq3.HashTable.calculateFileKey;
 
 /**
  * Created by Frotty on 06.03.2017.
@@ -29,10 +31,10 @@ public class MpqTests {
 
     private static File[] getMpqs() throws IOException {
         File[] files = new File(MpqTests.class.getClassLoader().getResource("./mpqs/").getFile())
-                .listFiles((dir, name) -> name.endsWith(".w3x") || name.endsWith("" + ".mpq"));
+                .listFiles((dir, name) -> name.endsWith(".w3x") || name.endsWith("" + ".mpq") || name.endsWith(".scx"));
         if (files != null) {
             for (int i = 0; i < files.length; i++) {
-                Path target = files[i].toPath().resolveSibling("file_" + i + ".mpq");
+                Path target = files[i].toPath().resolveSibling(files[i].getName() + "_copy");
                 files[i] = Files.copy(files[i].toPath(), target,
                         StandardCopyOption.REPLACE_EXISTING).toFile();
             }
@@ -207,7 +209,7 @@ public class MpqTests {
     public void testMultipleInstances() throws IOException {
         File[] mpqs = getMpqs();
         for (File mpq : mpqs) {
-            JMpqEditor mpqEditors[] = new JMpqEditor[]{new JMpqEditor(mpq, MPQOpenOption.READ_ONLY, MPQOpenOption.FORCE_V0),
+            JMpqEditor[] mpqEditors = new JMpqEditor[]{new JMpqEditor(mpq, MPQOpenOption.READ_ONLY, MPQOpenOption.FORCE_V0),
                     new JMpqEditor(mpq, MPQOpenOption.READ_ONLY, MPQOpenOption.FORCE_V0),
                     new JMpqEditor(mpq, MPQOpenOption.READ_ONLY, MPQOpenOption.FORCE_V0)};
             for (JMpqEditor mpqEditor1 : mpqEditors) {
@@ -223,7 +225,31 @@ public class MpqTests {
     public void testIncompressibleFile() throws IOException {
         File[] mpqs = getMpqs();
         for (File mpq : mpqs) {
+            log.info(mpq.getName());
             insertAndVerify(mpq, "incompressible.w3u");
+        }
+    }
+
+    @Test
+    public void testDuplicatePaths() throws IOException {
+        File[] mpqs = getMpqs();
+        for (File mpq : mpqs) {
+            if (mpq.getName().equals("invalidHashSize.scx_copy")) {
+                continue;
+            }
+            try (JMpqEditor mpqEditor = new JMpqEditor(mpq, MPQOpenOption.FORCE_V0)) {
+                if (!mpqEditor.isCanWrite()) {
+                    return;
+                }
+                mpqEditor.insertByteArray("Test", "bytesasdadasdad".getBytes());
+                Assert.expectThrows(IllegalArgumentException.class, () -> {
+                    mpqEditor.insertByteArray("Test", "bytesasdadasdad".getBytes());
+                });
+                Assert.expectThrows(IllegalArgumentException.class, () -> {
+                    mpqEditor.insertByteArray("teST", "bytesasdadasdad".getBytes());
+                });
+                mpqEditor.insertByteArray("teST", "bytesasdadasdad".getBytes(), true);
+            }
         }
     }
 
@@ -303,6 +329,16 @@ public class MpqTests {
             mpqEditor.deleteFile(filename);
         }
 
+        try (JMpqEditor mpqEditor = new JMpqEditor(mpq, MPQOpenOption.FORCE_V0)) {
+            if (!mpqEditor.isCanWrite()) {
+                return;
+            }
+            mpqEditor.insertFile(filename, getFile(filename), false, true);
+            mpqEditor.insertFile(filename, getFile(filename), false, true);
+
+            mpqEditor.deleteFile(filename);
+        }
+
         try (JMpqEditor mpqEditor = new JMpqEditor(mpq, MPQOpenOption.READ_ONLY, MPQOpenOption.FORCE_V0)) {
             Assert.assertFalse(mpqEditor.hasFile(filename));
         }
@@ -366,9 +402,31 @@ public class MpqTests {
             String inName = file.toString().substring(file.toString().lastIndexOf(resourceDir) + resourceDir.length() + File.separator.length());
 
             mpqEditor.insertFile(inName, file, false);
-            mpqEditor.insertFile(inName, file, false);
         }
 
         mpqEditor.close();
+    }
+    
+    @Test()
+    public void testForGetMpqFileByBlock() throws IOException {
+        File[] mpqs = getMpqs();
+        for (File mpq : mpqs) {
+            if (mpq.getName().equals("invalidHashSize.scx_copy")) {
+                continue;
+            }
+            try (JMpqEditor mpqEditor = new JMpqEditor(mpq, MPQOpenOption.FORCE_V0)) {
+
+                Assert.assertTrue(mpqEditor.getMpqFilesByBlockTable().size() > 0);
+                BlockTable blockTable = mpqEditor.getBlockTable();
+                Assert.assertNotNull(blockTable);
+
+                for (BlockTable.Block block : blockTable.getAllVaildBlocks()) {
+                    if (block.hasFlag(MpqFile.ENCRYPTED)) {
+                        continue;
+                    }
+                    Assert.assertNotNull(mpqEditor.getMpqFileByBlock(block));
+                }
+            }
+        }
     }
 }

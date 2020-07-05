@@ -95,10 +95,8 @@ public class JMpqEditor implements AutoCloseable {
     /** The list file. */
     private Listfile listFile = new Listfile();
     /** The internal filename. */
-    private IdentityHashMap<ByteBuffer, String> internalFilename = new IdentityHashMap<>();
+    private IdentityHashMap<String, ByteBuffer> filenameToData = new IdentityHashMap<>();
     /** The files to add. */
-    // BuildData
-    private ArrayList<ByteBuffer> filesToAdd = new ArrayList<>();
     /** The keep header offset. */
     private boolean keepHeaderOffset = true;
     /** The new header size. */
@@ -225,11 +223,10 @@ public class JMpqEditor implements AutoCloseable {
                     }
                     for (String fileName : listFile.getFiles()) {
                         if (!hasFile(fileName)) {
-                            canWrite = false;
-                            log.warn("mpq's listfile is incomplete: " + fileName + " exists in listfile but not in archive.");
-                            return;
+                            log.warn("listfile entry does not exist in archive and will be discarded: " + fileName);
                         }
                     }
+                    listFile.getFileMap().entrySet().removeIf(file -> !hasFile(file.getValue()));
                 }
             } catch (Exception e) {
                 log.warn("Extracting the mpq's listfile failed. It cannot be rebuild.", e);
@@ -384,7 +381,7 @@ public class JMpqEditor implements AutoCloseable {
         discBlockSize = 512 * (1 << sectorSizeShift);
         hashPos = buffer.getInt() & 0xFFFFFFFFL;
         blockPos = buffer.getInt() & 0xFFFFFFFFL;
-        hashSize = buffer.getInt();
+        hashSize = buffer.getInt() & 0x0FFFFFFF;
         blockSize = buffer.getInt();
 
         // version 1 extension
@@ -470,8 +467,8 @@ public class JMpqEditor implements AutoCloseable {
         }
         if (hasFile("(listfile)") && listFile != null) {
             for (String s : listFile.getFiles()) {
-                log.debug("extracting: " + s);
-                File temp = new File(dest.getAbsolutePath() + dest.separator + s);
+                log.debug("extracting: " + (dest.separatorChar == '\\' ? s : s.replace("\\", dest.separator)));
+                File temp = new File(dest.getAbsolutePath() + dest.separator + (dest.separatorChar == '\\' ? s : s.replace("\\", dest.separator)));
                 temp.getParentFile().mkdirs();
                 if (hasFile(s)) {
                     // Prevent exception due to nonexistent listfile entries
@@ -493,7 +490,7 @@ public class JMpqEditor implements AutoCloseable {
             try {
                 int i = 0;
                 for (Block b : blocks) {
-                    if ((b.getFlags() & MpqFile.ENCRYPTED) == MpqFile.ENCRYPTED) {
+                    if (b.hasFlag(MpqFile.ENCRYPTED)) {
                         continue;
                     }
                     ByteBuffer buf = ByteBuffer.allocate(b.getCompressedSize()).order(ByteOrder.LITTLE_ENDIAN);
@@ -621,6 +618,44 @@ public class JMpqEditor implements AutoCloseable {
     }
 
     /**
+     * Gets the mpq file.
+     *
+     * @param block a block
+     * @return the mpq file
+     * @throws IOException Signals that an I/O exception has occurred.
+     */
+    public MpqFile getMpqFileByBlock(BlockTable.Block block) throws IOException {
+        if (block.hasFlag(MpqFile.ENCRYPTED)) {
+            throw new IOException("cant access this block");
+        }
+        ByteBuffer buffer = ByteBuffer.allocate(block.getCompressedSize()).order(ByteOrder.LITTLE_ENDIAN);
+        fc.position(headerOffset + block.getFilePos());
+        readFully(buffer, fc);
+        buffer.rewind();
+
+        return new MpqFile(buffer, block, discBlockSize, "");
+    }
+    
+    /**
+     * Gets the mpq files.
+     *
+     * @return the mpq files
+     * @throws IOException Signals that an I/O exception has occurred.
+     */
+    public List<MpqFile> getMpqFilesByBlockTable() throws IOException {
+        List<MpqFile> mpqFiles = new ArrayList<>();
+        ArrayList<Block> list = blockTable.getAllVaildBlocks();
+        for (Block block : list) {
+            try {
+                MpqFile mpqFile = getMpqFileByBlock(block);
+                mpqFiles.add(mpqFile);
+            } catch (IOException ignore) {
+            }
+        }
+        return mpqFiles;
+    }
+
+    /**
      * Deletes the specified file out of the mpq once you rebuild the mpq.
      *
      * @param name of the file inside the mpq
@@ -631,7 +666,33 @@ public class JMpqEditor implements AutoCloseable {
             throw new NonWritableChannelException();
         }
 
-        listFile.removeFile(name);
+        if (listFile.containsFile(name)) {
+            listFile.removeFile(name);
+            filenameToData.remove(name);
+        }
+    }
+
+    /**
+     * Inserts the specified byte array into the mpq once you close the editor.
+     *
+     * @param name     of the file inside the mpq
+     * @param input    the input byte array
+     * @param override whether to override an existing file with the same name
+     * @throws IllegalArgumentException    when the mpq has filename and not override
+     */
+    public void insertByteArray(String name, byte[] input, boolean override) throws NonWritableChannelException,
+            IllegalArgumentException {
+        if (!canWrite) {
+            throw new NonWritableChannelException();
+        }
+
+        if ((!override) && listFile.containsFile(name)) {
+            throw new IllegalArgumentException("Archive already contains file with name: " + name);
+        }
+
+        listFile.addFile(name);
+        ByteBuffer data = ByteBuffer.wrap(input);
+        filenameToData.put(name, data);
     }
 
     /**
@@ -639,17 +700,22 @@ public class JMpqEditor implements AutoCloseable {
      *
      * @param name  of the file inside the mpq
      * @param input the input byte array
-     * @throws JMpqException if file is not found or access errors occur
+     * @throws IllegalArgumentException    when the mpq has filename
      */
-    public void insertByteArray(String name, byte[] input) throws NonWritableChannelException {
-        if (!canWrite) {
-            throw new NonWritableChannelException();
-        }
-
-        listFile.addFile(name);
-        ByteBuffer data = ByteBuffer.wrap(input);
-        filesToAdd.add(data);
-        internalFilename.put(data, name);
+    public void insertByteArray(String name, byte[] input) throws NonWritableChannelException, IllegalArgumentException {
+        insertByteArray(name, input, false);
+    }
+    
+    /**
+     * Inserts the specified file into the mpq once you close the editor.
+     *
+     * @param name       of the file inside the mpq
+     * @param file       the file
+     * @param backupFile if true the editors creates a copy of the file to add, so
+     *                   further changes won't affect the resulting mpq
+     */
+    public void insertFile(String name, File file, boolean backupFile) throws IOException, IllegalArgumentException {
+        insertFile(name, file, backupFile, false);
     }
 
     /**
@@ -659,30 +725,39 @@ public class JMpqEditor implements AutoCloseable {
      * @param file       the file
      * @param backupFile if true the editors creates a copy of the file to add, so
      *                   further changes won't affect the resulting mpq
+     * @param override   whether to override an existing file with the same name
      * @throws JMpqException if file is not found or access errors occur
      */
-    public void insertFile(String name, File file, boolean backupFile) throws IOException {
+    public void insertFile(String name, File file, boolean backupFile, boolean override) throws IOException, IllegalArgumentException {
         if (!canWrite) {
             throw new NonWritableChannelException();
         }
 
-        try {
+        log.info("insert file: " + name);
+
+        if ((!override) && listFile.containsFile(name)) {
+            throw new IllegalArgumentException("Archive already contains file with name: " + name);
+        }
+
+        try{
             listFile.addFile(name);
             if (backupFile) {
                 File temp = File.createTempFile("jmpq", "backup", JMpqEditor.tempDir);
                 temp.deleteOnExit();
                 Files.copy(file.toPath(), temp.toPath(), StandardCopyOption.REPLACE_EXISTING);
                 ByteBuffer data = ByteBuffer.wrap(Files.readAllBytes(temp.toPath()));
-                filesToAdd.add(data);
-                internalFilename.put(data, name);
+                filenameToData.put(name, data);
             } else {
                 ByteBuffer data = ByteBuffer.wrap(Files.readAllBytes(file.toPath()));
-                filesToAdd.add(data);
-                internalFilename.put(data, name);
+                filenameToData.put(name, data);
             }
         } catch (IOException e) {
             throw new JMpqException(e);
         }
+    }
+
+    public void closeReadOnly() throws IOException {
+        fc.close();
     }
 
     public void close() throws IOException {
@@ -751,15 +826,14 @@ public class JMpqEditor implements AutoCloseable {
         }
         long currentPos = (keepHeaderOffset ? headerOffset : 0) + headerSize;
 
-        for (ByteBuffer file : filesToAdd) {
-            existingFiles.remove(internalFilename.get(file));
+        for (String fileName : filenameToData.keySet()) {
+            existingFiles.remove(fileName);
         }
 
         for (String existingName : existingFiles) {
-            if (options.recompress && !existingName.endsWith("wav")) {
+            if (options.recompress && !existingName.endsWith(".wav")) {
                 ByteBuffer extracted = ByteBuffer.wrap(extractFileAsBytes(existingName));
-                internalFilename.put(extracted, existingName);
-                filesToAdd.add(extracted);
+                filenameToData.put(existingName, extracted);
             } else {
                 newFiles.add(existingName);
                 int pos = hashTable.getBlockIndexOfFile(existingName);
@@ -778,15 +852,16 @@ public class JMpqEditor implements AutoCloseable {
         }
         log.debug("Added existing files");
         HashMap<String, ByteBuffer> newFileMap = new HashMap<>();
-        for (ByteBuffer newFile : filesToAdd) {
-            newFiles.add(internalFilename.get(newFile));
-            newFileMap.put(internalFilename.get(newFile), newFile);
+        for (String newFileName : filenameToData.keySet()) {
+            ByteBuffer newFile = filenameToData.get(newFileName);
+            newFiles.add(newFileName);
+            newFileMap.put(newFileName, newFile);
             MappedByteBuffer fileWriter = writeChannel.map(MapMode.READ_WRITE, currentPos, newFile.limit() * 2);
             Block newBlock = new Block(currentPos - (keepHeaderOffset ? headerOffset : 0), 0, 0, 0);
             newBlocks.add(newBlock);
             MpqFile.writeFileAndBlock(newFile.array(), newBlock, fileWriter, newDiscBlockSize, options);
             currentPos += newBlock.getCompressedSize();
-            log.debug("Added file " + internalFilename.get(newFile));
+            log.debug("Added file " + newFileName);
         }
         log.debug("Added new files");
         if (buildListfile && !listFile.getFiles().isEmpty()) {
@@ -950,13 +1025,22 @@ public class JMpqEditor implements AutoCloseable {
     public void setKeepHeaderOffset(boolean keepHeaderOffset) {
         this.keepHeaderOffset = keepHeaderOffset;
     }
-
-    /*
+    
+    
+    /**
+     * Get block table block table.
+     *
+     * @return the block table
+     */
+    public BlockTable getBlockTable() {
+        return blockTable;
+    }
+    
+    /**
      * (non-Javadoc)
      *
      * @see java.lang.Object#toString()
      */
-
     @Override
     public String toString() {
         return "JMpqEditor [headerSize=" + headerSize + ", archiveSize=" + archiveSize + ", formatVersion=" + formatVersion + ", discBlockSize=" + discBlockSize
